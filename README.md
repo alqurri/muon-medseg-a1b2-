@@ -1,7 +1,6 @@
 # Muon vs. AdamW for Medical Image Segmentation
 
-Code to reproduce *"A Real but Variable Benefit: A Controlled Evaluation of the
-Muon Optimizer for Medical Image Segmentation"* (anonymous submission, under
+Code to reproduce *"A Controlled Evaluation of Muon for Medical Image Segmentation"* (anonymous submission, under
 review at TMLR).
 
 We evaluate the Muon optimizer against AdamW across seven medical segmentation
