@@ -3,13 +3,13 @@ from collections import defaultdict
 import numpy as np
 
 DS = {
- "brats":  ("results_brats",   4,  "BraTS"),
- "synapse":("results_synapse", 9,  "Synapse"),
- "acdc":   ("results",         4,  "ACDC"),
- "flare":  ("results_flare",   14, "FLARE22"),
- "isic":   ("results_isic",    2,  "ISIC"),
- "camus":  ("results_camus",   4,  "CAMUS"),
- "amos":   ("results_amos",    16, "AMOS22"),
+ "brats":  ("results_brats_v2",     4,  "BraTS"),
+ "synapse":("results_syn_v3",       9,  "Synapse"),
+ "acdc":   ("results_acdc_v2",      4,  "ACDC"),
+ "flare":  ("results_flare_npz_v2", 14, "FLARE22"),
+ "isic":   ("results_isic_v2",      2,  "ISIC"),
+ "camus":  ("results_camus_v2",     4,  "CAMUS"),
+ "amos":   ("results_amos_npz_v2",  16, "AMOS22"),
 }
 VMDIR = {"acdc":"results_vmunet_acdc", "camus":"results_vmunet_camus", "synapse":"results_vmunet_synapse"}
 ORDER = ["amos","flare","synapse","brats","isic","camus","acdc"]
@@ -27,8 +27,11 @@ def sel_lr(d, fname, key):
         except: return None
     return None
 
-def load(d, model, opt, lr, ds, aug):
+def load(d, model, opt, lr, ds, aug, expect_nc=None, expect_frac=1.0,
+         require_protocol=2, require_epochs=200, expect_aux_lr=None,
+         require_aux=False):
     if lr is None: return {}
+    ds_root = ds.split("_")[0]
     best={}
     for f in glob.glob(os.path.join(d,"*.json")):
         b=os.path.basename(f)
@@ -37,7 +40,46 @@ def load(d, model, opt, lr, ds, aug):
         except: continue
         c=r.get("config",{})
         if c.get("model")!=model or c.get("optimizer")!=opt or c.get("aug")!=aug: continue
-        if abs(c.get("lr",-1)-lr)>1e-9 or c.get("epochs",0)<150: continue
+        if abs(c.get("lr",-1)-lr)>1e-9: continue
+        # --- SKIP tuning runs BEFORE final-run provenance checks ---
+        # a tuning run is marked run_role=="tuning", or (for older files without
+        # the field) has fewer than the final epoch budget.
+        role = c.get("run_role")
+        if role == "tuning": continue
+        if role is None and c.get("epochs", 0) < (require_epochs or 200): continue
+        # --- required metadata ---
+        for _req in ("dataset", "n_classes", "seed", "epochs"):
+            if _req not in c:
+                raise ValueError(f"{f}: missing required metadata '{_req}'")
+        # --- protocol version ---
+        if require_protocol is not None and c.get("_protocol_version") != require_protocol:
+            raise ValueError(f"{f}: protocol version {c.get('_protocol_version')} "
+                             f"!= required {require_protocol} (old/uncorrected run)")
+        # --- exact epoch budget for final runs ---
+        if require_epochs is not None and c.get("epochs") != require_epochs:
+            raise ValueError(f"{f}: epochs {c.get('epochs')} != required {require_epochs}")
+        # --- dataset identity, class count, training fraction ---
+        cds = str(c.get("dataset","")).split("_")[0]
+        if cds and cds != ds_root:
+            raise ValueError(f"{f}: dataset '{c.get('dataset')}' does not match "
+                             f"requested '{ds}'")
+        if expect_nc is not None and c.get("n_classes") != expect_nc:
+            raise ValueError(f"{f}: n_classes {c.get('n_classes')} != expected {expect_nc}")
+        if abs(float(c.get("train_frac", 1.0)) - float(expect_frac)) > 1e-9:
+            continue
+        # --- auxiliary AdamW LR (only meaningful for muon/hybrid runs) ---
+        if require_aux:
+            if c.get("adamw_lr_for_hybrid") is None:
+                raise ValueError(f"{f}: missing required adamw_lr_for_hybrid metadata")
+            if expect_aux_lr is not None and \
+               abs(float(c["adamw_lr_for_hybrid"]) - float(expect_aux_lr)) > 1e-9:
+                raise ValueError(f"{f}: adamw_lr_for_hybrid {c['adamw_lr_for_hybrid']} "
+                                 f"!= expected {expect_aux_lr}")
+        elif expect_aux_lr is not None and "adamw_lr_for_hybrid" in c \
+                and c.get("adamw_lr_for_hybrid") is not None \
+                and abs(float(c["adamw_lr_for_hybrid"]) - float(expect_aux_lr)) > 1e-9:
+            raise ValueError(f"{f}: adamw_lr_for_hybrid {c['adamw_lr_for_hybrid']} "
+                             f"!= expected {expect_aux_lr}")
         s=c["seed"]; mt=os.path.getmtime(f)
         if s not in best or mt>best[s][0]: best[s]=(mt,r)
     out={}
@@ -57,9 +99,11 @@ def bootci(A,B,seeds,pats,n=10000):
         o[b]=np.mean(v)*100
     return np.percentile(o,[2.5,97.5])
 
-def cell(d, model, ds, aug, lrfile):
+def cell(d, model, ds, aug, lrfile, nc=None, aux_lr=3e-4):
     mlr=sel_lr(d, lrfile, f"{model}/muon"); alr=sel_lr(d, lrfile, f"{model}/adamw")
-    A=load(d,model,"adamw",alr,ds,aug); M=load(d,model,"muon",mlr,ds,aug)
+    # AdamW-vs-AdamW comparison has no auxiliary group; only Muon/hybrid runs do.
+    A=load(d,model,"adamw",alr,ds,aug,expect_nc=nc)
+    M=load(d,model,"muon",mlr,ds,aug,expect_nc=nc,expect_aux_lr=aux_lr,require_aux=True)
     seeds=sorted(set(A)&set(M))
     if not seeds: return None
     pats=sorted(set.intersection(*[set(A[s]) for s in seeds],*[set(M[s]) for s in seeds]))
@@ -90,13 +134,26 @@ def compute():
     for ds,(d,nc,name) in DS.items():
         R[ds]={"name":name,"nc":nc}
         for model in ("unet","transunet"):
-            h=cell(d,model,ds,"full","best_lrs.json")
-            lf="best_lrs_light.json" if (os.path.exists(os.path.join(d,"best_lrs_light.json")) and json.load(open(os.path.join(d,"best_lrs_light.json")))) else "best_lrs.json"
-            l=cell(d,model,ds,"light",lf)
+            h=cell(d,model,ds,"full","best_lrs.json",nc=nc)
+            # Use the full-grid light-tuning file ONLY if it contains this
+            # model's learning rates; otherwise fall back to best_lrs.json.
+            _lp=os.path.join(d,"best_lrs_light.json")
+            _has_model_light=False
+            if os.path.exists(_lp):
+                try:
+                    _bl=json.load(open(_lp))
+                    _has_model_light=(f"{model}/muon" in _bl and f"{model}/adamw" in _bl)
+                except Exception:
+                    _has_model_light=False
+            lf="best_lrs_light.json" if _has_model_light else "best_lrs.json"
+            if not _has_model_light:
+                print(f"# NOTE: {name}/{model} light uses the heavy-grid rate "
+                      f"(no independent light LR in best_lrs_light.json)")
+            l=cell(d,model,ds,"light",lf,nc=nc)
             R[ds][f"{model}_heavy"]=h; R[ds][f"{model}_light"]=l
             R[ds][f"{model}_intx"]=interaction(h,l) if (h and l) else None
         if ds in VMDIR and os.path.isdir(VMDIR[ds]):
-            R[ds]["mamba_heavy"]=cell(VMDIR[ds],"vmunet",ds,"full","best_lrs.json")
+            R[ds]["mamba_heavy"]=cell(VMDIR[ds],"vmunet",ds,"full","best_lrs.json",nc=nc)
     return R
 
 def fmt(x, bold=False):

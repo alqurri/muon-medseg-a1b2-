@@ -1,3 +1,11 @@
+# =====================================================================
+# HISTORICAL / DEMONSTRATION SCRIPT -- NOT the source of the paper's tables.
+# This script does not apply the full validated run-selection (per-cell LR
+# filtering, newest-per-seed deduplication, and ED/ES patient clustering)
+# used for the reported numbers. Use regenerate_all.py as the single pipeline
+# for every value and table in the paper. Retained only to document earlier
+# analysis steps.
+# =====================================================================
 """
 Difficulty-gradient figure for the paper.
 

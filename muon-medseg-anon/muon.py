@@ -107,14 +107,21 @@ class Muon(torch.optim.Optimizer):
                     if group["rms_match"]:
                         upd = upd * (0.2 * math.sqrt(max(upd.size(0), upd.size(1))))
                 else:
-                    # orthogonalization-free control: same momentum + magnitude,
-                    # only the singular-value structure differs.
+                    # Orthogonalization-free control: keep the same momentum
+                    # update and only remove spectrum flattening. To match the
+                    # *actual* magnitude of the orthogonalized+scaled update
+                    # (whose empirical RMS from the finite 5-step Newton--Schulz
+                    # is ~0.177*sqrt(max), NOT the nominal 0.2*sqrt(max)), we
+                    # compute the orthogonalized update's RMS on this step and
+                    # rescale the raw momentum to it, so only the singular-value
+                    # structure differs and the per-element RMS is matched
+                    # exactly rather than nominally.
                     if group["rms_match"]:
-                        m_, n_ = upd.size(0), upd.size(1)
-                        target = 0.2 * math.sqrt(max(m_, n_)) * \
-                                 math.sqrt(min(m_, n_) / (m_ * n_))
+                        ref = zeropower_via_newtonschulz5(upd, steps=group["ns_steps"])
+                        ref = ref * (0.2 * math.sqrt(max(upd.size(0), upd.size(1))))
+                        target_rms = ref.square().mean().sqrt().clamp_min(1e-12)
                         rms = upd.square().mean().sqrt().clamp_min(1e-12)
-                        upd = upd * (target / rms)
+                        upd = upd * (target_rms / rms)
 
                 if wd != 0:
                     p.mul_(1 - lr * wd)
@@ -167,8 +174,15 @@ def split_params(model, head_names=("head", "out_conv", "classifier", "seg_head"
         if not p.requires_grad:
             continue
         low = name.lower()
+        # SSM state parameters (A_logs, D/Ds, dt-related) are not genuine linear
+        # projection maps even when 2D; route them to AdamW to match the paper's
+        # stated routing and to keep the native-linear-map count to projections.
+        ssm_state_names = ("a_log", "a_logs", ".ds", "ds.", "d_state_param",
+                           "dt_bias", "dt_proj.bias")
         if p.ndim < 2:
             why = "1D (norm/bias)"
+        elif any(s in low for s in ssm_state_names):
+            why = "ssm state (AdamW)"
         elif p.ndim == 3 or any(e in low.split(".") for e in embed_names):
             why = "embedding"
         elif any(h in low for h in head_names):

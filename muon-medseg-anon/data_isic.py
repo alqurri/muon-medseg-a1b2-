@@ -38,7 +38,7 @@ from torch.utils.data import Dataset
 
 from data import augment, AUG_FULL, AUG_LIGHT   # reuse the same augmentations
 
-ISIC_ROOT = "./data/ISIC2018"
+ISIC_ROOT = "./data/ISIC"
 _CSV = "ISBI2016_ISIC_Part1_{mode}_GroundTruth.csv"
 
 

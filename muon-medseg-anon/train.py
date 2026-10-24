@@ -45,11 +45,19 @@ def dice_ce_loss(logits, target, n_classes, eps=1.0):
     return ce + dice
 
 
-def _forward_pred(model, x, device, amp):
-    x = x.to(device, non_blocking=True)
-    with torch.autocast("cuda", torch.bfloat16, enabled=amp and device == "cuda"):
-        logits = model(x)
-    return logits.float().argmax(1).cpu().numpy()
+def _forward_pred(model, x, device, amp, chunk=4):
+    # Chunk the forward pass over the first (slice/batch) dim so a large volume
+    # (e.g. AMOS 16-class, many slices) does not allocate the whole output at
+    # once during evaluation. Predictions are identical to a single pass; only
+    # peak memory differs.
+    outs = []
+    for i in range(0, x.shape[0], chunk):
+        xb = x[i:i + chunk].to(device, non_blocking=True)
+        with torch.autocast("cuda", torch.bfloat16, enabled=amp and device == "cuda"):
+            logits = model(xb)
+        outs.append(logits.float().argmax(1).cpu().numpy())
+        del logits, xb
+    return np.concatenate(outs, axis=0)
 
 
 @torch.no_grad()
@@ -184,7 +192,7 @@ def run(cfg: dict) -> dict:
     total = cfg["epochs"] * max(1, len(tl))
     scheds = [torch.optim.lr_scheduler.OneCycleLR(
         o, max_lr=[pg["lr"] for pg in o.param_groups], total_steps=total,
-        pct_start=0.05, anneal_strategy="cos") for o in opts]
+        pct_start=0.05, anneal_strategy="cos", cycle_momentum=False) for o in opts]
 
     best, best_state, hist = -1.0, None, []
     t0, step_times = time.time(), []

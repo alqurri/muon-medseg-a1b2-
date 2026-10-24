@@ -10,7 +10,8 @@ def patient_of(cid, dataset):
         c = re.sub(r"[_\-](0|1)$", "", c)
     return c
 
-def load(dir, opt, lr, dataset, aug="full"):
+def load(dir, opt, lr, dataset, aug="full", expect_nc=None, expect_frac=1.0,
+         expect_aux_lr=None, require_aux=False):
     best = {}
     for f in glob.glob(os.path.join(dir, "*.json")):
         b = os.path.basename(f)
@@ -19,7 +20,36 @@ def load(dir, opt, lr, dataset, aug="full"):
         except: continue
         c = r.get("config", {})
         if c.get("model")!="unet" or c.get("optimizer")!=opt or c.get("aug")!=aug: continue
-        if abs(c.get("lr",-1)-lr)>1e-9 or c.get("epochs",0)<150: continue
+        if abs(c.get("lr",-1)-lr)>1e-9: continue
+        # skip tuning runs; require final runs at the corrected protocol
+        role = c.get("run_role")
+        if role == "tuning": continue
+        if role is None and c.get("epochs",0) < 200: continue
+        if c.get("_protocol_version") != 2:
+            raise ValueError(f"{f}: protocol {c.get('_protocol_version')} != 2 "
+                             f"(old/uncorrected run; rerun before analysis)")
+        if c.get("epochs") != 200:
+            raise ValueError(f"{f}: epochs {c.get('epochs')} != 200")
+        # dataset identity + required metadata
+        _dsroot = str(dataset).split("_")[0]
+        _cds = str(c.get("dataset","")).split("_")[0]
+        if _cds and _cds != _dsroot:
+            raise ValueError(f"{f}: dataset '{c.get('dataset')}' != requested '{dataset}'")
+        for _req in ("dataset", "n_classes", "seed"):
+            if _req not in c:
+                raise ValueError(f"{f}: missing required metadata '{_req}'")
+        # class-count VALUE, training fraction, auxiliary LR
+        if expect_nc is not None and c.get("n_classes") != expect_nc:
+            raise ValueError(f"{f}: n_classes {c.get('n_classes')} != expected {expect_nc}")
+        if abs(float(c.get("train_frac", 1.0)) - float(expect_frac)) > 1e-9:
+            raise ValueError(f"{f}: train_frac {c.get('train_frac')} != expected {expect_frac}")
+        if require_aux:
+            if c.get("adamw_lr_for_hybrid") is None:
+                raise ValueError(f"{f}: missing required adamw_lr_for_hybrid metadata")
+            if expect_aux_lr is not None and \
+               abs(float(c["adamw_lr_for_hybrid"]) - float(expect_aux_lr)) > 1e-9:
+                raise ValueError(f"{f}: adamw_lr_for_hybrid {c['adamw_lr_for_hybrid']} "
+                                 f"!= expected {expect_aux_lr}")
         s=c["seed"]; mt=os.path.getmtime(f)
         if s not in best or mt>best[s][0]: best[s]=(mt,r)
     out={}
@@ -41,9 +71,23 @@ def boot_ci(A,B,seeds,patients,n=10000,seed=0):
     return np.percentile(out,2.5), np.percentile(out,97.5)
 
 def main(a):
-    A_m=load(a.muon_dir,"adamw",a.adamw_lr,a.dataset)
-    M=load(a.muon_dir,"muon",a.muon_lr,a.dataset)
-    NS=load(a.noortho_dir,"muon_noortho",a.nsopt_lr,a.dataset)
+    # Expected class count per dataset (Synapse full = 9; others below). If
+    # --n-classes is given it overrides; otherwise it is derived so the value
+    # check is NEVER silently skipped.
+    _NC = {"synapse": 9, "flare": 14, "amos": 16, "brats": 4,
+           "acdc": 4, "camus": 4, "isic": 2}
+    if a.n_classes is None:
+        a.n_classes = _NC.get(str(a.dataset).split("_")[0])
+        if a.n_classes is None:
+            raise SystemExit(f"unknown dataset '{a.dataset}': pass --n-classes explicitly")
+    A_m=load(a.muon_dir,"adamw",a.adamw_lr,a.dataset,
+             expect_nc=a.n_classes,expect_frac=a.train_frac)
+    M=load(a.muon_dir,"muon",a.muon_lr,a.dataset,
+           expect_nc=a.n_classes,expect_frac=a.train_frac,
+           expect_aux_lr=a.aux_lr,require_aux=True)
+    NS=load(a.noortho_dir,"muon_noortho",a.nsopt_lr,a.dataset,
+            expect_nc=a.n_classes,expect_frac=a.train_frac,
+            expect_aux_lr=a.aux_lr,require_aux=True)
     seeds=sorted(set(A_m)&set(M)&set(NS))
     if not seeds:
         print(f"{a.dataset}: no common seeds (A {sorted(A_m)}, M {sorted(M)}, NS {sorted(NS)})"); return
@@ -65,4 +109,9 @@ if __name__=="__main__":
     ap.add_argument("--dataset",required=True)
     ap.add_argument("--muon-lr",type=float,required=True); ap.add_argument("--adamw-lr",type=float,required=True)
     ap.add_argument("--nsopt-lr",type=float,required=True)
+    ap.add_argument("--n-classes",type=int,default=None,dest="n_classes",
+                    help="expected class count; validated against each run")
+    ap.add_argument("--train-frac",type=float,default=1.0,dest="train_frac")
+    ap.add_argument("--aux-lr",type=float,default=3e-4,dest="aux_lr",
+                    help="expected auxiliary AdamW LR for Muon/Muon-NS runs")
     main(ap.parse_args())

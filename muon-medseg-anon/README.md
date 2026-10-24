@@ -29,7 +29,7 @@ under `./data/` (or pass `--data-root`). Paths in the loaders default to
 | Synapse  | Multi-atlas abdominal CT (BTCV) | 8 organs + background |
 | ACDC     | ACDC challenge                  | cardiac MRI, ED/ES |
 | CAMUS    | CAMUS echocardiography          | cardiac ultrasound, ED/ES |
-| ISIC     | ISIC 2018 (task 1)              | dermoscopy, binary |
+| ISIC     | ISIC 2016 (skin-lesion)              | dermoscopy, binary (see loader) |
 
 Volumetric NIfTI datasets are preprocessed to slice `.npz`:
 ```bash
@@ -67,12 +67,13 @@ python run_study.py --stage 1 --dataset brats_npz --n-classes 4 --models unet \
 python run_study.py --stage 1 --dataset synapse --n-classes 9 --train-frac 0.5 \
     --models unet --outdir results_syn_frac0.5 --data-root ./data/Synapse
 ```
-Convenience recipes: `run_frac.sh`, `run_noortho.sh`, `run_light_fulltune.sh`,
-`run_acdc_noortho.sh` (edit the data paths at the top of each).
+The experiment sweeps (orthogonalization control, training-fraction ablation,
+light-regime full tuning) are run with the `run_study.py` invocations shown
+above, varying `--optimizers`, `--train-frac`, `--outdir`, and the stage flags.
 
 ## Analysis: single source of truth
 
-**`regenerate_all.py` computes every number and LaTeX table row in the paper**
+**`regenerate_all.py` is the validated pipeline for the main Dice-comparison and interaction tables** (and their per-seed appendix rows)
 from the results directories (deduplicated newest-per-seed, LR-filtered via each
 dir's `best_lrs.json`/`best_lrs_light.json`, patient-clustered with ED/ES
 averaging).
@@ -82,14 +83,17 @@ python regenerate_all.py            # human-readable summary
 python regenerate_all.py --latex    # ready-to-paste LaTeX table rows
 ```
 
-Supporting scripts:
-- `analyze_v2.py`  — seed-level, patient-clustered deltas + hierarchical bootstrap CIs
-- `interaction.py` — augmentation x optimizer interaction + per-seed consistency
-- `check_ablation.py` — LR-filtered label-merge ablation deltas
-- `paired_noortho.py`, `noortho_consistent.py` — Muon vs. Muon-NS paired comparison
-- `verify_interaction.py` — dedup + LR-filter interaction check
-- `verify_amos_mri.py` — confirms the AMOS22 MRI subset by intensity fingerprinting
-- `make_figure.py` — the benefit-vs-baseline figure
+Also used for the reported numbers:
+- `make_per_seed_csv.py` — writes `per_seed_results.csv` (per-seed Muon-minus-AdamW
+  deltas for every main-table condition) from the same `compute()` as the tables.
+- `make_figure_v2.py` — the benefit-vs-baseline figure (`benefit_figure.pdf`).
+- `noortho_consistent.py` — the orthogonalization-free (Muon-NS) control.
+- `verify_amos_mri.py` — confirms the AMOS22 MRI subset by intensity fingerprinting.
+
+Legacy / exploratory scripts, **not** used for the reported numbers (they carry a
+HISTORICAL/DEMONSTRATION header and predate the consolidated pipeline above; kept
+only for reference): `analyze.py`, `analyze_v2.py`, `interaction.py`,
+`check_ablation.py`, `paired_noortho.py`, `make_figure.py`, `verify_interaction.py`.
 
 ## Statistical protocol
 

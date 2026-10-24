@@ -1,6 +1,9 @@
 torch>=2.0
 numpy
 scipy
+pandas
+matplotlib
+Pillow
 h5py
 nibabel
 SimpleITK

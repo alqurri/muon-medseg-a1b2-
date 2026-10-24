@@ -46,8 +46,8 @@ from data import augment, AUG_FULL, AUG_LIGHT
 
 BRATS_ROOT = "./data/BraTS2020"
 
-SLICE_STRIDE = 3          # brain spans ~100 axial slices; stride 3 keeps enough
-MAX_SLICES_PER_VOL = 50
+SLICE_STRIDE = 2          # brain spans ~100 axial slices; stride 3 keeps enough
+MAX_SLICES_PER_VOL = 60
 
 # raw BraTS label -> contiguous. 4 (enhancing) -> 3; others unchanged.
 _LABEL_MAP = {0: 0, 1: 1, 2: 2, 4: 3}

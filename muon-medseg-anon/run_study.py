@@ -46,10 +46,16 @@ MODELS = ["unet", "transunet"]   # default; override with --models
 SEEDS = [0, 1, 2, 3, 4]
 
 
+PROTOCOL_VERSION = 2  # bump when training/eval protocol changes
+
+
 def key(cfg) -> str:
-    ident = {k: cfg[k] for k in
+    ident = {k: cfg.get(k) for k in
              ("model", "optimizer", "lr", "seed", "aug", "epochs",
-              "data_root", "dataset")}
+              "data_root", "dataset", "n_classes", "train_frac",
+              "batch", "adamw_lr_for_hybrid", "size", "clip",
+              "weight_decay", "eval_every", "run_role")}
+    ident["_protocol_version"] = PROTOCOL_VERSION
     h = hashlib.md5(json.dumps(ident, sort_keys=True).encode()).hexdigest()[:10]
     ds = cfg.get("dataset", "acdc")
     return (f"{ds}_{cfg['model']}_{cfg['optimizer']}_lr{cfg['lr']:g}"
@@ -57,11 +63,38 @@ def key(cfg) -> str:
 
 
 def do(cfg, outdir) -> dict | None:
+    cfg = dict(cfg)
+    cfg["_protocol_version"] = PROTOCOL_VERSION
+    # run_role: tuning runs use the reduced sweep budget; final runs use the
+    # full budget. Analysis must skip tuning runs before validating final-run
+    # provenance. If a caller set run_role explicitly, keep it.
+    if "run_role" not in cfg:
+        cfg["run_role"] = "tuning" if cfg.get("epochs", 0) < 150 else "final"
     os.makedirs(outdir, exist_ok=True)
     path = os.path.join(outdir, key(cfg) + ".json")
     if os.path.exists(path):
-        print(f"[skip] {os.path.basename(path)}")
-        return json.load(open(path))
+        try:
+            _prev = json.load(open(path)).get("config", {})
+            # protocol version must match on a cache hit; an unstamped or older
+            # result from a previous release must NOT be silently reused.
+            if _prev.get("_protocol_version") != PROTOCOL_VERSION:
+                raise ValueError(
+                    f"cache protocol mismatch at {path}: stored="
+                    f"{_prev.get('_protocol_version')} current={PROTOCOL_VERSION} "
+                    f"-- refusing to reuse a result from a different protocol")
+            for _k in ("dataset", "n_classes", "train_frac", "model", "optimizer",
+                       "lr", "seed", "aug", "run_role"):
+                if _k in cfg and _prev.get(_k) != cfg.get(_k):
+                    raise ValueError(
+                        f"cache config mismatch at {path}: {_k} "
+                        f"stored={_prev.get(_k)} requested={cfg.get(_k)}")
+        except (ValueError,):
+            raise
+        except Exception:
+            pass
+        else:
+            print(f"[skip] {os.path.basename(path)}")
+            return json.load(open(path))
     print(f"\n[run ] {os.path.basename(path)}")
     try:
         res = run(cfg)
@@ -102,12 +135,14 @@ def stage1(args):
     """
     best = {}
     adamw_lrs, muon_lrs = _grids_for(args.dataset)
+    _optset = args.optimizers if getattr(args, "optimizers", None) else ["adamw", "muon"]
+    _pairs = [(o, adamw_lrs if o == "adamw" else muon_lrs) for o in _optset]
     for m in MODELS:
-        for opt, lrs in (("adamw", adamw_lrs), ("muon", muon_lrs)):
+        for opt, lrs in _pairs:
             scores = {}
             for lr in lrs:
                 cfg = default_cfg(model=m, optimizer=opt, lr=lr, seed=0,
-                                  epochs=args.sweep_epochs, aug=args.aug,
+                                  epochs=args.sweep_epochs, aug=args.aug, run_role="tuning",
                                   data_root=args.data_root, batch=args.batch,
                                   n_classes=args.n_classes, dataset=args.dataset,
                                   train_frac=args.train_frac, verbose=False)
@@ -136,19 +171,20 @@ def _load_best(args):
 def stage2(args):
     """2 optimizers x 2 architectures x 5 seeds, full budget, best LR each."""
     best = _load_best(args)
+    _optset = args.optimizers if getattr(args, "optimizers", None) else ["adamw", "muon"]
     for m in MODELS:
-        for opt in ("adamw", "muon"):
+        for opt in _optset:
             k = f"{m}/{opt}"
             if k not in best:
                 continue
             for s in SEEDS:
                 cfg = default_cfg(model=m, optimizer=opt, lr=best[k]["lr"],
-                                  seed=s, epochs=args.epochs, aug=args.aug,
+                                  seed=s, epochs=args.epochs, aug=args.aug, run_role="final",
                                   data_root=args.data_root, batch=args.batch,
                                   n_classes=args.n_classes,
                                   dataset=args.dataset,
                                   train_frac=args.train_frac,
-                                  adamw_lr_for_hybrid=best[f"{m}/adamw"]["lr"],
+                                  adamw_lr_for_hybrid=3e-4,  # fixed aux-AdamW rate (matches paper), consistent across tuning+final
                                   verbose=False)
                 do(cfg, args.outdir)
 
@@ -157,17 +193,18 @@ def stage3(args):
     """Augmentation-interaction arm. Only worth running if Stage 2 is non-flat."""
     best = _load_best(args)
     m = args.stage3_model
+    _optset = args.optimizers if getattr(args, "optimizers", None) else ["adamw", "muon"]
     for aug in ("light", "full"):
-        for opt in ("adamw", "muon"):
+        for opt in _optset:
             k = f"{m}/{opt}"
             for s in SEEDS:
                 cfg = default_cfg(model=m, optimizer=opt, lr=best[k]["lr"],
-                                  seed=s, epochs=args.epochs, aug=aug,
+                                  seed=s, epochs=args.epochs, aug=aug, run_role="final",
                                   data_root=args.data_root, batch=args.batch,
                                   n_classes=args.n_classes,
                                   dataset=args.dataset,
                                   train_frac=args.train_frac,
-                                  adamw_lr_for_hybrid=best[f"{m}/adamw"]["lr"],
+                                  adamw_lr_for_hybrid=3e-4,  # fixed aux-AdamW rate (matches paper), consistent across tuning+final
                                   verbose=False)
                 do(cfg, args.outdir)
 
@@ -179,12 +216,14 @@ def stage1_light(args):
     light-aug final runs use a light-tuned LR, not the heavy-selected one."""
     best = {}
     adamw_lrs, muon_lrs = _grids_for(args.dataset)
+    _optset = args.optimizers if getattr(args, "optimizers", None) else ["adamw", "muon"]
+    _pairs = [(o, adamw_lrs if o == "adamw" else muon_lrs) for o in _optset]
     for m in MODELS:
-        for opt, lrs in (("adamw", adamw_lrs), ("muon", muon_lrs)):
+        for opt, lrs in _pairs:
             scores = {}
             for lr in lrs:
                 cfg = default_cfg(model=m, optimizer=opt, lr=lr, seed=0,
-                                  epochs=args.sweep_epochs, aug="light",
+                                  epochs=args.sweep_epochs, aug="light", run_role="tuning",
                                   data_root=args.data_root, batch=args.batch,
                                   n_classes=args.n_classes, dataset=args.dataset,
                                   train_frac=args.train_frac, verbose=False)
@@ -212,17 +251,18 @@ def stage3_light(args):
         raise SystemExit("run --stage 1L first (best_lrs_light.json missing)")
     best = _j.load(open(p))
     m = args.stage3_model
-    for opt in ("adamw", "muon"):
+    _optset = args.optimizers if getattr(args, "optimizers", None) else ["adamw", "muon"]
+    for opt in _optset:
         k = f"{m}/{opt}"
         if k not in best:
             continue
         for s in SEEDS:
             cfg = default_cfg(model=m, optimizer=opt, lr=best[k]["lr"],
-                              seed=s, epochs=args.epochs, aug="light",
+                              seed=s, epochs=args.epochs, aug="light", run_role="final",
                               data_root=args.data_root, batch=args.batch,
                               n_classes=args.n_classes, dataset=args.dataset,
                               train_frac=args.train_frac,
-                              adamw_lr_for_hybrid=best[f"{m}/adamw"]["lr"],
+                              adamw_lr_for_hybrid=3e-4,  # fixed aux-AdamW rate (matches paper), consistent across tuning+final
                               verbose=False)
             do(cfg, args.outdir)
 
@@ -246,6 +286,8 @@ if __name__ == "__main__":
     ap.add_argument("--train-frac", type=float, default=1.0,
                     help="subsample Synapse training cases (difficulty knob); 1.0=full")
     ap.add_argument("--verbose-layers", action="store_true")
+    ap.add_argument("--optimizers", nargs="+", default=None,
+                    help="override optimizer set, e.g. adamw muon_noortho")
     a = ap.parse_args()
     if a.models:
         globals()["MODELS"] = a.models

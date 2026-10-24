@@ -152,8 +152,19 @@ class SynapseVolumeDataset(Dataset):
 
 def build_synapse_datasets(root=None, size=224, aug_regime="full", seed=0,
                            n_classes=9,
-                           train_npz=SYN_TRAIN_NPZ, test_h5=SYN_TEST_H5,
-                           lists=SYN_LISTS, train_frac=1.0):
+                           train_npz=None, test_h5=None,
+                           lists=None, train_frac=1.0):
+    # Honor --data-root: derive the npz/h5/lists locations from it when given,
+    # so the loader is not tied to the hardcoded ./data/Synapse defaults.
+    # Explicit train_npz/test_h5/lists arguments still override.
+    if root is not None:
+        train_npz = train_npz or os.path.join(root, "train_npz")
+        test_h5   = test_h5   or os.path.join(root, "test_vol_h5")
+        lists     = lists     or os.path.join(root, "lists_Synapse")
+    else:
+        train_npz = train_npz or SYN_TRAIN_NPZ
+        test_h5   = test_h5   or SYN_TEST_H5
+        lists     = lists     or SYN_LISTS
     """Same return shape as data.build_datasets: (train, val, test).
 
     Synapse has no official val split in the TransUNet lists; if val.txt is

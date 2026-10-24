@@ -146,11 +146,11 @@ class SS2D(nn.Module):
         D = self.Ds[k].float()
         if _HAS_MAMBA and seq.is_cuda:
             y = selective_scan_fn(seq, dt, A, B.unsqueeze(1), C.unsqueeze(1),
-                                  D, delta_bias=self.dt_proj[k].bias.float(),
+                                  D, delta_bias=None,  # bias already applied in dt_proj above
                                   delta_softplus=True)
         else:
             y = _selective_scan_ref(seq, dt, A, B, C, D,
-                                    delta_bias=self.dt_proj[k].bias.float())
+                                    delta_bias=None)  # bias already applied in dt_proj
         return y
 
     def forward(self, x):                                       # x: (b, H, W, d_model)
